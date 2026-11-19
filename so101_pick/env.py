@@ -1,6 +1,6 @@
 """SO-101 pick environment (PROVIDED, you do not need to edit this file).
 
-Task: approach a 2.5 cm cube, grasp it, and lift it 5 cm off the floor.
+Task: grasp a 2.5 cm cube and lift it at least 15.1 cm above its resting height.
 
 What you DO edit (see the TODO markers):
     so101_pick/rewards.py        TODO 1: the reward function
@@ -35,7 +35,7 @@ MODEL_PATH = os.path.join(_HERE, "..", "assets", "so101", "pick_scene.xml")
 
 # --- Task constants -----------------------------------------------------------
 CUBE_HALF = 0.0125            # cube half-edge (m); resting centre height
-LIFT_HEIGHT = 0.15            # success: cube centre this far above its rest height
+LIFT_HEIGHT = 0.151           # cube centre this far above its rest height
 PAN_AXIS_XY = (0.0388353, 0.0)  # world xy of the shoulder_pan axis (cube spawns around it)
 
 # --- Control constants --------------------------------------------------------
@@ -62,6 +62,7 @@ class SO101PickEnv(gym.Env):
         obs_fn: Optional[Callable] = None,
         render_size: tuple[int, int] = (480, 640),
         camera: str = "front",
+        near_cube_start_probability: float = 0.0,
     ):
         """
         randomization: 0.0 -> cube always at the same spot; 1.0 -> full random
@@ -79,6 +80,10 @@ class SO101PickEnv(gym.Env):
         self.max_episode_steps = max_episode_steps
         self.randomization = float(randomization)
         self.render_size, self.camera = render_size, camera
+        if not 0.0 <= near_cube_start_probability <= 1.0:
+            raise ValueError("near_cube_start_probability must be in [0, 1]")
+        self.near_cube_start_probability = float(near_cube_start_probability)
+        self.near_cube_start_fraction = 0.0
 
         self.model = mujoco.MjModel.from_xml_path(MODEL_PATH)
         self.data = mujoco.MjData(self.model)
@@ -87,6 +92,7 @@ class SO101PickEnv(gym.Env):
         # ids
         self._ee_site = m.site("gripperframe").id
         self._cube_body = m.body("cube").id
+        self._gripper_body = m.body("gripper").id
         self._cube_geom = m.geom("cube_geom").id
         self._floor_geom = m.geom("floor").id
         cj = m.joint("cube_joint")
@@ -123,6 +129,18 @@ class SO101PickEnv(gym.Env):
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=probe.shape, dtype=np.float32)
 
     # ------------------------------------------------------------------ reset
+    def set_near_cube_start_probability(self, probability: float):
+        """Set the curriculum through VecEnv.env_method, across Gym wrappers."""
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError("near_cube_start_probability must be in [0, 1]")
+        self.near_cube_start_probability = float(probability)
+
+    def set_near_cube_start_fraction(self, fraction: float):
+        """Interpolate reset joints from the near pose (0) to normal home (1)."""
+        if not 0.0 <= fraction <= 1.0:
+            raise ValueError("near_cube_start_fraction must be in [0, 1]")
+        self.near_cube_start_fraction = float(fraction)
+
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
         m, d, rng = self.model, self.data, self.np_random
@@ -148,6 +166,19 @@ class SO101PickEnv(gym.Env):
         d.qpos[a + 3:a + 7] = [np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)]
         self._cube_xy0 = np.array([x, y])
 
+        # Reset curriculum only: no actions or expert transitions are added
+        # to training. The jaws start open and the cube remains on the floor.
+        if self.near_cube_start_probability > 0 and rng.random() < self.near_cube_start_probability:
+            target = np.array([x, y, CUBE_HALF + rng.uniform(0.004, 0.010)])
+            target[:2] += rng.uniform(-0.002, 0.002, size=2)
+            near_pose = self._near_cube_pose(target)
+            fraction = self.near_cube_start_fraction
+            self._target[:4] = (1 - fraction) * near_pose + fraction * q_arm
+            self._target[5] = 0.3 * (1 - fraction) + GRIPPER_OPEN * fraction
+            for i, adr in enumerate(self._q_adr):
+                d.qpos[adr] = self._target[i]
+            d.ctrl[self._act_ids] = self._target
+
         # let things settle (the cube drops the last ~0 mm; the arm reaches its pose)
         for _ in range(100):
             mujoco.mj_step(m, d)
@@ -155,6 +186,27 @@ class SO101PickEnv(gym.Env):
         self._prev_action = np.zeros(5)
         state = self._get_state()
         return self._obs(state), self._info(state)
+
+    def _near_cube_pose(self, target: np.ndarray) -> np.ndarray:
+        """Find an open, downward-facing reset pose by damped least squares."""
+        q = self._target[:4].copy()
+        arm_addresses = np.array(self._q_adr[:4])
+        basis = np.eye(4) * 1e-5
+
+        def error(angles):
+            self.data.qpos[arm_addresses] = angles
+            mujoco.mj_forward(self.model, self.data)
+            direction = self.data.xmat[self._gripper_body].reshape(3, 3) @ np.array([0., 0., -1.])
+            return np.r_[self.data.site_xpos[self._ee_site] - target, 0.1 * direction[:2]]
+
+        for _ in range(80):
+            residual = error(q)
+            if np.linalg.norm(residual) < 1e-5:
+                break
+            jacobian = np.column_stack([(error(q + basis[k]) - residual) / 1e-5 for k in range(4)])
+            delta = np.linalg.solve(jacobian.T @ jacobian + 1e-5 * np.eye(4), -jacobian.T @ residual)
+            q = np.clip(q + np.clip(delta, -0.1, 0.1), self._ctrl_lo[:4], self._ctrl_hi[:4])
+        return q
 
     # ------------------------------------------------------------------- step
     def step(self, action):
@@ -232,6 +284,8 @@ class SO101PickEnv(gym.Env):
             "dist_ee_cube": state["dist_ee_cube"],
             "cube_height": state["cube_height"],
             "is_grasped": state["is_grasped"],
+            "arm_floor_contact": state["arm_floor_contact"],
+            "gripper_opening": state["gripper_opening"],
         }
 
     # ----------------------------------------------------------------- render

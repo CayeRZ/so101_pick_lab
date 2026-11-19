@@ -48,17 +48,52 @@ Check your work with:  python -m pytest tests/test_reward.py   (or: python tests
 """
 import numpy as np
 
+from .env import LIFT_HEIGHT
+
 
 def compute_reward(state: dict, action: np.ndarray) -> float:
-    # ----------------------------------------------------------------------
-    # TODO 1: replace this starter with a staged, dense reward.
-    #
-    # Suggested structure (you decide the exact terms and weights):
-    #   1. approach: reward for reducing the distance between jaws and cube
-    #   2. grasp:    reward for closing the gripper *around* the cube
-    #                (use is_grasped; avoid rewarding a closed gripper in empty air)
-    #   3. lift:     reward for cube_height, only while grasped
-    #   4. success:  a large bonus when state["success"]
-    #   + small penalties if you need them (floor contact, big actions, ...)
-    # ----------------------------------------------------------------------
-    return 1.0 if state["success"] else 0.0
+    """Return a scalar reward using metres, radians, and the env success flag."""
+    grasped = bool(state["is_grasped"])
+
+    offset = np.asarray(state["ee_to_cube"])
+    lateral_error = float(np.linalg.norm(offset[:2]))
+    close_readiness = 1.0 - np.tanh(max(0.0, state["dist_ee_cube"] - 0.008) / 0.01)
+    close_readiness *= 1.0 - np.tanh(max(0.0, lateral_error - 0.005) / 0.01)
+    approach_cost = (0.35 * np.tanh(lateral_error / 0.04)
+                     + 0.55 * np.tanh(abs(float(offset[2])) / 0.025))
+
+
+    premature_close = np.tanh(max(0.0, 0.3 - state["gripper_opening"]) / 0.2)
+    missed_close = np.tanh(max(0.0, state["gripper_opening"] - 0.05) / 0.6)
+    excess_open = np.tanh(max(0.0, state["gripper_opening"] - 0.6) / 0.6)
+    opening_cost = (0.2 * (1.0 - close_readiness) * premature_close
+                    + 0.3 * close_readiness * missed_close + 0.2 * excess_open)
+
+
+    touching = bool(state["fixed_jaw_contact"] or state["moving_jaw_contact"])
+    grasp_cost = (0.0 if grasped else
+                  0.3 + opening_cost - 0.12 * close_readiness * touching)
+
+
+    lift_progress = 0.0
+    if grasped:
+        height_fraction = np.clip(state["cube_height"] / LIFT_HEIGHT, 0.0, 1.0)
+        lift_progress = float(np.tanh(height_fraction) / np.tanh(1.0))
+    lift_cost = 0.4 * (1.0 - lift_progress)
+
+
+    slide_cost = 0.1 * np.tanh(max(0.0, state["cube_xy_moved"]) / 0.05)
+    if grasped:
+        slide_cost *= 1.0 - np.tanh(max(0.0, state["cube_height"]) / 0.025)
+    floor_cost = 0.5 * bool(state["arm_floor_contact"])
+    action_cost = 0.01 * np.mean(np.square(np.clip(action, -1.0, 1.0)))
+    velocity_cost = 0.01 * np.mean(np.square(np.tanh(state["joint_vel"] / 2.0)))
+    reward = -0.01 - slide_cost - floor_cost - action_cost - velocity_cost
+
+    if state["success"]:
+        steps_left = np.clip((150 - state["step"]) / 150.0, 0.0, 1.0)
+        reward += 1.0 + steps_left
+    else:
+        reward -= approach_cost + grasp_cost + lift_cost
+
+    return float(reward)

@@ -22,8 +22,8 @@ measure on a real SO-101. The contact flags are not free on hardware (you would 
 touch sensing or motor-current thresholds), so keep that in mind when discussing
 sim-to-real in your report.
 
-Heads up: a saved model is tied to this observation size (21). Do not change it
-after training, or the checkpoint can no longer be loaded.
+Heads up: this grasp-and-lift task uses 21 observations. Checkpoints from the
+23-observation lift-and-turn task are incompatible; train a new model.
 """
 import numpy as np
 

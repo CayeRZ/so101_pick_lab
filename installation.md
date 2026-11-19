@@ -14,7 +14,8 @@ This lab does **not** need ROS 2, Gazebo, or Docker. It needs only Python and a 
 
 ## Requirements
 
-- Python **3.10 or newer** (3.11 or 3.12 recommended)
+- Python **3.10–3.12** for `requirements.txt` (3.11 recommended). The pinned
+  PyTorch 2.2.2 wheels do not support Python 3.13 or newer.
 - ~3 GB free disk (mostly PyTorch)
 - Internet access for `pip`
 
@@ -23,6 +24,37 @@ This lab does **not** need ROS 2, Gazebo, or Docker. It needs only Python and a 
 ## A. Local install (Linux, macOS, Windows via WSL2)
 
 > **Windows:** use WSL2 (Ubuntu 22.04/24.04) for the least friction. Open an Ubuntu terminal and follow the Linux steps. Native Windows also works for the pip packages, but the lab is tested on Linux/macOS.
+
+### macOS Intel (x86_64): Conda setup
+
+Use this setup on an Intel Mac for a consistent Python 3.10 CPU environment. Install an
+Intel/x86_64 build of Conda (for example, Miniforge) first. Do not mix Conda-installed
+PyTorch with pip-installed PyTorch, and do not install CUDA packages on macOS.
+
+```bash
+conda create -n pytorch_env python=3.10 -y
+conda activate pytorch_env
+python -m pip install --upgrade pip
+
+# Confirm this terminal is using an Intel Python, not an arm64/Rosetta mismatch.
+python -c "import platform, sys; print(platform.machine(), sys.executable); assert platform.machine() == 'x86_64'"
+
+# Install the pinned macOS CPU wheel, then the rest of the compatible lab stack.
+python -m pip install torch==2.2.2
+python -m pip install -r requirements.txt
+python -m pip check
+```
+
+The requirements file pins PyTorch, MuJoCo, Gymnasium, Stable-Baselines3, and NumPy
+to a mutually compatible set. Use `python -m pip` while this Conda environment is
+active; do not install the unpinned commands from the generic setup below on top of it.
+
+Before training on this machine, set `N_ENVS = 1` in `train.py`. This uses
+`DummyVecEnv` instead of spawning worker processes, avoiding native-library and
+multiprocessing crashes on macOS. Training will use less parallelism, but the small
+policy can run on CPU. Keep `MUJOCO_GL` unset on macOS.
+
+Continue to [Verify your install](#verify-your-install), starting with `python scripts/check_env.py --no-render`.
 
 ### 1. Create a virtual environment
 
@@ -244,6 +276,8 @@ A window should open. This does not work on Colab or on remote/headless machines
 
 | Symptom | Fix |
 |---|---|
+| `No matching distribution found for torch` | Use Python 3.11 and install `requirements.txt`. On Intel macOS, use `torch==2.2.2` from PyPI. An existing Python 3.13 venv must be replaced or deactivated before activating the Python 3.11 environment. |
+| `No broken requirements found` but imports fail | `pip check` only checks installed packages; a failed install can leave required packages missing. Activate the intended environment and rerun `python -m pip install -r requirements.txt` successfully before running checks. |
 | `ModuleNotFoundError` | Your venv isn't active. Run `source ~/so101-rl/bin/activate`. |
 | `gladLoadGL error` / `EGL` errors | Install the libs in step A4, or switch to `export MUJOCO_GL=osmesa`. |
 | `Cannot initialize a EGL device display` (Colab) | Set `MUJOCO_GL` **before** importing mujoco, or use `osmesa`. |
