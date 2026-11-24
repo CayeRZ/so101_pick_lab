@@ -101,6 +101,27 @@ def test_reset_curriculum_fades_and_does_not_modify_evaluation_env():
     train_env.close(); eval_env.close()
 
 
+def test_relative_reset_curriculum_restarts_on_resume_and_finishes_at_home():
+    for mode in ("mixture", "interpolate"):
+        train = DummyVecEnv([StageEnv])
+        model = SimpleNamespace(num_timesteps=833844, logger=Logger(None, []), get_env=lambda: train)
+        callback = ResetCurriculumCallback(duration=100, mode=mode, relative_steps=True)
+        callback.init_callback(model)
+        callback.on_training_start({}, {})
+        assert train.envs[0].near_cube_start_probability == 1.0
+        model.num_timesteps += 50
+        callback.on_step()
+        if mode == "mixture":
+            assert train.envs[0].near_cube_start_probability == 0.5
+        else:
+            assert train.envs[0].near_cube_start_probability == 1.0
+            assert train.envs[0].near_cube_start_fraction == 0.5
+        model.num_timesteps += 50
+        callback.on_step()
+        assert train.envs[0].near_cube_start_probability == 0.0
+        train.close()
+
+
 def test_best_checkpoint_keeps_its_own_observation_statistics(tmp_path):
     train_env = VecNormalize(DummyVecEnv([StageEnv]), norm_reward=False)
     eval_env = VecNormalize(DummyVecEnv([StageEnv]), training=False, norm_reward=False)

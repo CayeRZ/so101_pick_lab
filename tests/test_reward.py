@@ -7,7 +7,7 @@ import copy, os, sys
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from so101_pick import SO101PickEnv
-from so101_pick.rewards import compute_reward
+from so101_pick.rewards import compute_reward, OVERSHOOT_HEIGHT
 from so101_pick.env import LIFT_HEIGHT
 
 ZERO = np.zeros(5, dtype=np.float32)
@@ -169,6 +169,54 @@ def test_earlier_success_is_better():
     late = copy.deepcopy(early)
     late["step"] = 150
     assert compute_reward(early, ZERO) > compute_reward(late, ZERO)
+
+
+def test_rising_with_a_grasp_beats_holding_and_lowering_at_the_same_height():
+    held = grasped(base_state(), 0.08)
+    held.update(previous_cube_height=0.08, previous_is_grasped=True)
+    rising = copy.deepcopy(held)
+    rising["previous_cube_height"] = 0.07
+    falling = copy.deepcopy(held)
+    falling["previous_cube_height"] = 0.09
+    assert compute_reward(rising, ZERO) > compute_reward(held, ZERO)
+    assert compute_reward(held, ZERO) > compute_reward(falling, ZERO)
+
+
+def test_ungrasped_upward_motion_earns_no_height_bonus():
+    air = with_dist(base_state(), 0.005)
+    air.update(cube_height=0.08, previous_cube_height=0.0, previous_is_grasped=False)
+    stationary = copy.deepcopy(air)
+    stationary["previous_cube_height"] = 0.08
+    assert compute_reward(air, ZERO) == compute_reward(stationary, ZERO)
+
+
+def test_losing_grasp_removes_height_credit_even_before_the_cube_falls():
+    held = grasped(base_state(), 0.10)
+    held.update(previous_cube_height=0.10, previous_is_grasped=True)
+    released = copy.deepcopy(held)
+    released.update(is_grasped=False, fixed_jaw_contact=False, moving_jaw_contact=False,
+                    success=False)
+    never_held = copy.deepcopy(released)
+    never_held["previous_is_grasped"] = False
+    assert compute_reward(released, ZERO) < compute_reward(never_held, ZERO)
+
+
+def test_penalty_starts_only_above_15_point_5_cm_and_grows_with_excess():
+    s = base_state()
+    rewards = [compute_reward(grasped(s, height), ZERO)
+               for height in (LIFT_HEIGHT, OVERSHOOT_HEIGHT, 0.156, 0.160, 0.170)]
+    assert np.isclose(rewards[0], rewards[1])
+    assert all(before > after for before, after in zip(rewards[1:], rewards[2:]))
+
+
+def test_terminal_crossing_prefers_goal_band_over_overshoot():
+    s = base_state()
+    target = grasped(s, LIFT_HEIGHT)
+    high = grasped(s, 0.160)
+    for state in (target, high):
+        state.update(previous_cube_height=0.145, previous_is_grasped=True)
+    assert target["success"] and high["success"]
+    assert compute_reward(target, ZERO) > compute_reward(high, ZERO)
 
 
 def test_floor_sliding_and_excessive_motion_are_penalized():

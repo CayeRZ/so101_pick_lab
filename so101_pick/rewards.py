@@ -14,13 +14,15 @@ reward so that RL can discover the whole behaviour.
     gripper_opening   float jaw joint angle (rad): ~-0.17 closed ... 1.75 wide open
                             (the cube is 2.5 cm wide: ~0.3 rad is "just wider than the cube")
     cube_height       float cube centre height above its resting height (m); 0 on the floor
+    previous_cube_height float cube height before the action (provided by step)
+    previous_is_grasped bool both jaws touched the cube before the action
     cube_xy_moved     float how far the cube slid sideways since reset (m)
     fixed_jaw_contact bool  fixed jaw touches the cube
     moving_jaw_contact bool moving jaw touches the cube
     is_grasped        bool  BOTH jaws touch the cube
     arm_floor_contact bool  some part of the robot touches the floor
     joint_vel         (5,)  joint velocities (rad/s)
-    success           bool  grasped AND cube_height >= 5 cm (episode ends)
+    success           bool  grasped AND cube_height >= 15.1 cm (episode ends)
     last_action       (5,)  the action just applied, in [-1, 1]
     step              int   steps taken so far in this episode: 0 at reset, then 1, 2, ...
                             An episode is at most 150 steps (20 Hz = 7.5 s), so
@@ -49,6 +51,11 @@ Check your work with:  python -m pytest tests/test_reward.py   (or: python tests
 import numpy as np
 
 from .env import LIFT_HEIGHT
+
+LIFT_PROGRESS_BONUS = 2.0
+OVERSHOOT_HEIGHT = 0.155      # height above rest, not absolute world z
+OVERSHOOT_SCALE = 0.005      # 0.5 cm excess gives tanh(1) of the penalty
+OVERSHOOT_PENALTY = 4.0
 
 
 def compute_reward(state: dict, action: np.ndarray) -> float:
@@ -81,6 +88,20 @@ def compute_reward(state: dict, action: np.ndarray) -> float:
         lift_progress = float(np.tanh(height_fraction) / np.tanh(1.0))
     lift_cost = 0.4 * (1.0 - lift_progress)
 
+    # A height change earns a one-off bonus, rather than paying every step for
+    # holding still below the goal. Lowering or losing the grasp removes the
+    # accumulated height credit. Clipping stops excess height earning credit.
+    height = float(state["cube_height"])
+    previous_height = float(state.get("previous_cube_height", height))
+    previous_grasped = bool(state.get("previous_is_grasped", grasped))
+    held_height = float(np.clip(height / LIFT_HEIGHT, 0.0, 1.0)) if grasped else 0.0
+    previous_held_height = (float(np.clip(previous_height / LIFT_HEIGHT, 0.0, 1.0))
+                            if previous_grasped else 0.0)
+    lift_bonus = LIFT_PROGRESS_BONUS * (held_height - previous_held_height)
+    overshoot_cost = (OVERSHOOT_PENALTY * np.tanh(max(0.0, height - OVERSHOOT_HEIGHT)
+                                                / OVERSHOOT_SCALE)
+                      if grasped else 0.0)
+
 
     slide_cost = 0.1 * np.tanh(max(0.0, state["cube_xy_moved"]) / 0.05)
     if grasped:
@@ -88,11 +109,12 @@ def compute_reward(state: dict, action: np.ndarray) -> float:
     floor_cost = 0.5 * bool(state["arm_floor_contact"])
     action_cost = 0.01 * np.mean(np.square(np.clip(action, -1.0, 1.0)))
     velocity_cost = 0.01 * np.mean(np.square(np.tanh(state["joint_vel"] / 2.0)))
-    reward = -0.01 - slide_cost - floor_cost - action_cost - velocity_cost
+    reward = (-0.01 - slide_cost - floor_cost - action_cost - velocity_cost
+              + lift_bonus - overshoot_cost)
 
     if state["success"]:
         steps_left = np.clip((150 - state["step"]) / 150.0, 0.0, 1.0)
-        reward += 1.0 + steps_left
+        reward += 2.0 + steps_left
     else:
         reward -= approach_cost + grasp_cost + lift_cost
 

@@ -85,6 +85,35 @@ def test_observation_matches_space():
         assert o.shape == e.observation_space.shape and np.all(np.isfinite(o))
 
 
+def test_reward_receives_previous_grasp_and_height_without_extra_observations():
+    captured = {}
+
+    def reward(state, action):
+        captured.update(state)
+        return 0.0
+
+    env = SO101PickEnv(randomization=0, reward_fn=reward)
+    before = env._get_state()
+    with patch("so101_pick.env.mujoco.mj_step",
+               side_effect=lambda *args: set_task_pose(env, 0.0, 0.03)):
+        obs, _, _, _, _ = env.step(np.zeros(5))
+    assert captured["previous_cube_height"] == before["cube_height"]
+    assert captured["previous_is_grasped"] == before["is_grasped"]
+    assert captured["is_grasped"]
+    assert np.isclose(captured["cube_height"], 0.03)
+    assert obs.shape == (21,)
+    env.close()
+
+
+def test_overshoot_can_have_negative_reward_and_still_end_as_success():
+    env = SO101PickEnv(randomization=0)
+    set_task_pose(env, 0.0, 0.16)
+    _, reward, terminated, truncated, info = frozen_step(env)
+    assert terminated and not truncated and info["is_success"]
+    assert reward < 0.0
+    env.close()
+
+
 def test_zero_action_keeps_cube_still():
     e = SO101PickEnv(); e.reset(seed=0)
     p0 = e.data.xpos[e._cube_body].copy()

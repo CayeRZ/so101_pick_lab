@@ -129,6 +129,12 @@ class SO101PickEnv(gym.Env):
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=probe.shape, dtype=np.float32)
 
     # ------------------------------------------------------------------ reset
+    def set_randomization(self, randomization: float):
+        """Change reset variation through VecEnv.env_method across wrappers."""
+        if not 0.0 <= randomization <= 1.0:
+            raise ValueError("randomization must be in [0, 1]")
+        self.randomization = float(randomization)
+
     def set_near_cube_start_probability(self, probability: float):
         """Set the curriculum through VecEnv.env_method, across Gym wrappers."""
         if not 0.0 <= probability <= 1.0:
@@ -210,6 +216,7 @@ class SO101PickEnv(gym.Env):
 
     # ------------------------------------------------------------------- step
     def step(self, action):
+        previous_state = self._get_state()
         a = np.clip(np.asarray(action, dtype=np.float64).reshape(5), -1.0, 1.0)
         self._target[:4] += a[:4] * ARM_STEP
         self._target[5] += a[4] * GRIPPER_STEP
@@ -220,6 +227,9 @@ class SO101PickEnv(gym.Env):
         self._steps += 1
 
         state = self._get_state(last_action=a)
+        # Reward-only transition information; the policy still observes 21 values.
+        state["previous_cube_height"] = previous_state["cube_height"]
+        state["previous_is_grasped"] = previous_state["is_grasped"]
         reward = float(self.reward_fn(state, a.astype(np.float32)))
         terminated = bool(state["success"])
         truncated = (not terminated) and self._steps >= self.max_episode_steps

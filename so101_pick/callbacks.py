@@ -39,7 +39,7 @@ class StopOnFullSuccessCallback(BaseCallback):
 class ResetCurriculumCallback(BaseCallback):
     """Fade near-cube resets to zero; evaluation environments are untouched."""
 
-    def __init__(self, duration: int, mode: str = "mixture"):
+    def __init__(self, duration: int, mode: str = "mixture", relative_steps: bool = False):
         super().__init__()
         if duration <= 0:
             raise ValueError("curriculum duration must be positive")
@@ -47,14 +47,17 @@ class ResetCurriculumCallback(BaseCallback):
         if mode not in ("mixture", "interpolate"):
             raise ValueError("unknown curriculum mode")
         self.mode = mode
+        self.relative_steps = relative_steps
+        self._start_timestep = 0
         self._last_update_step = None
         self._last_setting = None
 
     def _on_training_start(self):
+        self._start_timestep = self.num_timesteps if self.relative_steps else 0
         self._update_probability()
 
     def _update_probability(self):
-        fraction = min(1.0, self.num_timesteps / self.duration)
+        fraction = np.clip((self.num_timesteps - self._start_timestep) / self.duration, 0.0, 1.0)
         probability = (1.0 - fraction if self.mode == "mixture" else float(fraction < 1.0))
         setting = (probability, fraction)
         interval = min(100, max(1, self.duration // 100))
